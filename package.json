@@ -1,0 +1,16 @@
+{
+  "name": "project1",
+  "version": "1.0.0",
+  "description": "This workspace is prepared for a Codex automation that creates daily Naver blog content for the topics `운동` and `건강`.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "playwright": "^1.59.1"
+  }
+}

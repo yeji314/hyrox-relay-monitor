@@ -1,0 +1,7 @@
+.browser/
+output/
+node_modules/
+.naver-blog.env
+.DS_Store
+assets/
+logs/
