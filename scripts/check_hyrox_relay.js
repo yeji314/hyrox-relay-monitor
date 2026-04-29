@@ -9,6 +9,7 @@ const TARGET_URL =
 const TICKET_LABEL = 'HYROX WOMENS RELAY 여자 릴레이 | SUNDAY';
 const STATE_FILE = path.join(__dirname, '..', 'logs', 'hyrox-open-women-relay-state.json');
 const DEFAULT_CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const LOW_AVAILABILITY_THRESHOLD = 3;
 
 function normalize(text) {
   return (text || '').replace(/\s+/g, ' ').trim();
@@ -35,6 +36,37 @@ function resolveExecutablePath() {
     return DEFAULT_CHROME_PATH;
   }
   return undefined;
+}
+
+function buildLaunchOptions(useExecutablePath) {
+  const options = {
+    headless: true,
+  };
+
+  if (useExecutablePath) {
+    options.executablePath = useExecutablePath;
+  }
+
+  return options;
+}
+
+async function launchBrowser() {
+  const attempts = [
+    buildLaunchOptions(resolveExecutablePath()),
+    buildLaunchOptions(undefined),
+  ];
+
+  let lastError = null;
+
+  for (const options of attempts) {
+    try {
+      return await chromium.launch(options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError;
 }
 
 async function clickExact(page, label) {
@@ -64,24 +96,95 @@ async function getTicketText(page) {
 }
 
 function detectStatus(ticketText) {
-  if (ticketText.includes('매진 임박')) {
+  if (ticketText.includes('매진 임박') || ticketText.includes('LOW AVAILABILITY')) {
     return 'low_availability';
   }
-  if (ticketText.includes('티켓 구매 가능')) {
+  if (ticketText.includes('티켓 구매 가능') || ticketText.includes('TICKETS AVAILABLE')) {
     return 'available';
   }
-  if (ticketText.includes('매진')) {
+  if (ticketText.includes('매진') || ticketText.includes('SOLD OUT')) {
     return 'sold_out';
   }
   return 'unknown';
 }
 
-async function main() {
-  const browser = await chromium.launch({
-    headless: true,
-    executablePath: resolveExecutablePath(),
+function statusFromAvailabilityCount(count) {
+  if (typeof count !== 'number' || Number.isNaN(count)) {
+    return 'unknown';
+  }
+  if (count <= 0) {
+    return 'sold_out';
+  }
+  if (count <= LOW_AVAILABILITY_THRESHOLD) {
+    return 'low_availability';
+  }
+  return 'available';
+}
+
+function buildTicketTextFromAvailability(count) {
+  const priceText = '₩163,400';
+  const status = statusFromAvailabilityCount(count);
+  const prefix =
+    status === 'sold_out'
+      ? '매진'
+      : status === 'low_availability'
+        ? '매진 임박'
+        : '티켓 구매 가능';
+
+  return normalize(`${prefix} ${TICKET_LABEL} ${priceText}`);
+}
+
+function extractNextDataTicket(html) {
+  const nextDataMatch = html.match(
+    /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
+  );
+
+  if (!nextDataMatch) {
+    throw new Error('NEXT_DATA payload not found in checkout page.');
+  }
+
+  const nextData = JSON.parse(nextDataMatch[1]);
+  const tickets = nextData?.props?.pageProps?.event?.tickets;
+
+  if (!Array.isArray(tickets)) {
+    throw new Error('Ticket list not found in NEXT_DATA payload.');
+  }
+
+  const ticket = tickets.find((item) => item?.name === TICKET_LABEL);
+
+  if (!ticket) {
+    throw new Error(`Target ticket label not found in NEXT_DATA payload: ${TICKET_LABEL}`);
+  }
+
+  return ticket;
+}
+
+async function fallbackFetchTicket() {
+  const response = await fetch(TARGET_URL, {
+    headers: {
+      'user-agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+    },
   });
 
+  if (!response.ok) {
+    throw new Error(`Checkout page fetch failed: ${response.status}`);
+  }
+
+  const html = await response.text();
+  const ticket = extractNextDataTicket(html);
+  const availabilityCount = Number(ticket.v);
+
+  return {
+    ticketText: buildTicketTextFromAvailability(availabilityCount),
+    status: statusFromAvailabilityCount(availabilityCount),
+    availabilityCount,
+    source: 'next_data_fallback',
+  };
+}
+
+async function browserFetchTicket() {
+  const browser = await launchBrowser();
   const page = await browser.newPage({
     viewport: { width: 1400, height: 1800 },
   });
@@ -98,40 +201,69 @@ async function main() {
     await page.waitForTimeout(1200);
 
     const ticketText = await getTicketText(page);
-    const status = detectStatus(ticketText);
-    const now = new Date().toISOString();
-    const previous = loadState();
-
-    const result = {
-      checkedAt: now,
-      status,
-      previousStatus: previous?.status || null,
-      changed: previous?.status ? previous.status !== status : false,
-      target: {
-        category: 'Relay',
-        class: 'Open',
-        gender: 'Women',
-        label: TICKET_LABEL,
-      },
+    return {
       ticketText,
+      status: detectStatus(ticketText),
+      source: 'playwright_browser',
     };
-
-    saveState(result);
-
-    if (previous?.status === 'sold_out' && status !== 'sold_out') {
-      result.alert = true;
-      result.alertMessage = `HYROX Incheon Open Women Relay changed from sold out to ${status}.`;
-    } else {
-      result.alert = false;
-    }
-
-    console.log(JSON.stringify(result, null, 2));
-
-    if (status === 'unknown') {
-      process.exitCode = 2;
-    }
   } finally {
     await browser.close();
+  }
+}
+
+async function main() {
+  let fetchResult;
+  let browserError = null;
+
+  try {
+    fetchResult = await browserFetchTicket();
+  } catch (error) {
+    browserError = error;
+    fetchResult = await fallbackFetchTicket();
+  }
+
+  const now = new Date().toISOString();
+  const previous = loadState();
+
+  const result = {
+    checkedAt: now,
+    status: fetchResult.status,
+    previousStatus: previous?.status || null,
+    changed: previous?.status ? previous.status !== fetchResult.status : false,
+    target: {
+      category: 'Relay',
+      class: 'Open',
+      gender: 'Women',
+      label: TICKET_LABEL,
+    },
+    ticketText: fetchResult.ticketText,
+    source: fetchResult.source,
+  };
+
+  if (typeof fetchResult.availabilityCount === 'number') {
+    result.availabilityCount = fetchResult.availabilityCount;
+  }
+
+  if (browserError) {
+    result.browserFallback = {
+      used: true,
+      message: browserError.message,
+    };
+  }
+
+  saveState(result);
+
+  if (previous?.status === 'sold_out' && fetchResult.status !== 'sold_out') {
+    result.alert = true;
+    result.alertMessage = `HYROX Incheon Open Women Relay changed from sold out to ${fetchResult.status}.`;
+  } else {
+    result.alert = false;
+  }
+
+  console.log(JSON.stringify(result, null, 2));
+
+  if (fetchResult.status === 'unknown') {
+    process.exitCode = 2;
   }
 }
 

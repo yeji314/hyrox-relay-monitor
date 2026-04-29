@@ -36,7 +36,16 @@ jobs:
             exit "${script_exit}"
           fi
           cat hyrox-result.json
-          node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('hyrox-result.json','utf8')); fs.appendFileSync(process.env.GITHUB_OUTPUT, `alert=${data.alert}\nstatus=${data.status}\nsource=${data.source || ''}\n`);"
+          node - <<'NODE'
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync('hyrox-result.json', 'utf8'));
+          const lines = [
+            `alert=${data.alert}`,
+            `status=${data.status}`,
+            `source=${data.source || ''}`,
+          ];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join('\n')}\n`);
+          NODE
           if [ "${script_exit}" -eq 1 ]; then
             exit 1
           fi
