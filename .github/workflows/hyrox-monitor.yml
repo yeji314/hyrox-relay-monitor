@@ -29,9 +29,20 @@ jobs:
       - name: Check HYROX status
         id: hyrox
         run: |
-          node scripts/check_hyrox_relay.js > hyrox-result.json
+          script_exit=0
+          node scripts/check_hyrox_relay.js > hyrox-result.json || script_exit=$?
+          if [ ! -f hyrox-result.json ]; then
+            echo "HYROX check did not produce a result file."
+            exit "${script_exit}"
+          fi
           cat hyrox-result.json
-          node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('hyrox-result.json','utf8')); fs.appendFileSync(process.env.GITHUB_OUTPUT, `alert=${data.alert}\nstatus=${data.status}\n`);"
+          node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('hyrox-result.json','utf8')); fs.appendFileSync(process.env.GITHUB_OUTPUT, `alert=${data.alert}\nstatus=${data.status}\nsource=${data.source || ''}\n`);"
+          if [ "${script_exit}" -eq 1 ]; then
+            exit 1
+          fi
+          if [ "${script_exit}" -eq 2 ]; then
+            echo "HYROX status was unknown on this run. Continuing without alert."
+          fi
 
       - name: Send Slack alert
         if: steps.hyrox.outputs.alert == 'true'
