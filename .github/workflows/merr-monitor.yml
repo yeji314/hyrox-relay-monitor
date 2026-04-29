@@ -1,0 +1,50 @@
+name: Merr Blog Monitor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Check Merr blog
+        id: merr
+        run: |
+          node scripts/check_merr_blog.js > merr-result.json
+          cat merr-result.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync('merr-result.json', 'utf8'));
+          const lines = [
+            `has_new_post=${data.hasNewPost}`,
+            `latest_title=${JSON.stringify(data.latestTitle || '')}`,
+          ];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join('\n')}\n`);
+          NODE
+
+      - name: Summarize and send Slack message
+        if: steps.merr.outputs.has_new_post == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-5
+          MERR_SLACK_WEBHOOK_URL: ${{ secrets.MERR_SLACK_WEBHOOK_URL }}
+        run: node scripts/send_merr_summary.js
