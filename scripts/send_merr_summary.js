@@ -20,6 +20,10 @@ function truncate(text, maxLength) {
   return `${value.slice(0, maxLength)}...`;
 }
 
+function normalizeWhitespace(text) {
+  return (text || '').replace(/\s+/g, ' ').trim();
+}
+
 function buildPrompt(data) {
   const post = data.post || {};
   const informativeComments = (data.comments?.informative || []).slice(0, 8);
@@ -135,6 +139,31 @@ async function sendSlackMessage(text) {
   }
 }
 
+function buildFallbackMessage(data, error) {
+  const post = data.post || {};
+  const comments = (data.comments?.informative || []).slice(0, 3);
+  const commentLines = comments.length
+    ? comments.map((comment) => `- ${comment.userName}: ${truncate(normalizeWhitespace(comment.contents), 140)}`)
+    : ['- 정보성 댓글 추출 없음'];
+  const errorText = String(error?.message || error || 'unknown error');
+
+  return [
+    ':warning: 메르 블로그 새 글은 감지됐지만 자동 요약 생성은 실패했습니다.',
+    `- 제목: ${post.title || data.latestTitle || ''}`,
+    `- 날짜: ${post.dateLabel || post.publishedAt || data.latestPublishedAt || ''}`,
+    `- 링크: ${post.link || data.latestLink || ''}`,
+    `- 실패 사유: ${truncate(errorText, 220)}`,
+    '',
+    '간단 포인트',
+    `- 본문 미리보기: ${truncate(normalizeWhitespace(post.contentText || post.description || ''), 280)}`,
+    '정보성 댓글 일부',
+    ...commentLines,
+    '',
+    '참고',
+    '- OpenAI API quota 또는 외부 검증 단계 오류가 해소되면 다음 새 글부터는 원래 형식의 사실확인 요약으로 다시 전송됩니다.',
+  ].join('\n');
+}
+
 async function main() {
   const result = loadJson(RESULT_FILE);
   if (!result.hasNewPost) {
@@ -142,9 +171,15 @@ async function main() {
     return;
   }
 
-  const summary = await createSummary(buildPrompt(result));
-  await sendSlackMessage(summary);
-  console.log('Sent Merr blog summary to Slack.');
+  try {
+    const summary = await createSummary(buildPrompt(result));
+    await sendSlackMessage(summary);
+    console.log('Sent Merr blog summary to Slack.');
+  } catch (error) {
+    const fallback = buildFallbackMessage(result, error);
+    await sendSlackMessage(fallback);
+    console.error(error);
+  }
 }
 
 main().catch((error) => {
